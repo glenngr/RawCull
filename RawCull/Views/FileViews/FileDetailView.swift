@@ -7,9 +7,6 @@ struct FileDetailView: View {
     @Binding var cgImage: CGImage?
     @Binding var nsImage: NSImage?
     @Binding var selectedFileID: UUID?
-    @Binding var scale: CGFloat
-    @Binding var lastScale: CGFloat
-    @Binding var offset: CGSize
 
     let file: FileItem?
 
@@ -17,9 +14,6 @@ struct FileDetailView: View {
         if let file {
             VStack(spacing: 20) {
                 MainThumbnailImageView(
-                    scale: $scale,
-                    lastScale: $lastScale,
-                    offset: $offset,
                     url: file.url,
                     file: file,
                 )
@@ -29,12 +23,11 @@ struct FileDetailView: View {
                 guard let selectedID = selectedFileID,
                       let file = files.first(where: { $0.id == selectedID }) else { return }
 
-                ZoomPreviewHandler.handle(
+                viewModel.zoomExtractionTask?.cancel()
+                viewModel.zoomExtractionTask = ZoomPreviewHandler.handleOverlay(
                     file: file,
                     useThumbnailAsZoomPreview: viewModel.useThumbnailAsZoomPreview,
-                    setNSImage: { nsImage = $0 },
-                    setCGImage: { cgImage = $0 },
-                    openWindow: { id in openWindow(id: id) },
+                    viewModel: viewModel,
                 )
             }
         } else {

@@ -15,6 +15,26 @@ struct SaliencyInfo {
 }
 
 struct FocusDetectorConfig {
+    /// Aperture-derived tuning hint. Wide-aperture shots have a narrow focus plane
+    /// and deserve a stricter blur gate; landscape-aperture shots have deep DoF and
+    /// should not be pre-blurred as aggressively nor weighted so heavily toward the
+    /// Vision-detected salient region. `.mid` is the neutral baseline.
+    /// Explicit nonisolated conformance — default-isolation=MainActor would otherwise
+    /// make the synthesized Equatable.== main-isolated and unusable from the
+    /// nonisolated scoring statics.
+    enum ApertureHint: Equatable {
+        case wide // ≤ f/5.6
+        case mid // f/5.6–f/8
+        case landscape // ≥ f/8
+
+        nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+            switch (lhs, rhs) {
+            case (.wide, .wide), (.mid, .mid), (.landscape, .landscape): true
+            default: false
+            }
+        }
+    }
+
     var preBlurRadius: Float = 1.92
     /// ISO at capture time. Used to scale preBlurRadius upward at high ISO
     /// where noise would otherwise cause the Laplacian to fire on noise rather
@@ -46,6 +66,60 @@ struct FocusDetectorConfig {
 
     /// Half-size of the AF-point scoring region as a fraction of image dimension.
     var afRegionRadius: Float = 0.12
+
+    /// Aperture hint driving the soft blur-gate thresholds, the landscape blur damp,
+    /// and the landscape salient-weight override. Set per-file by SharpnessScoringModel
+    /// from EXIF; defaults to `.mid` when aperture is unknown.
+    var apertureHint: ApertureHint = .mid
+}
+
+extension FocusDetectorConfig.ApertureHint {
+    /// Lower end of the soft blur-gate ramp. Below this subject-region σ, the final
+    /// score is multiplied by 0.20 (strong, but no longer the old 0.12 cliff).
+    nonisolated var blurGateLow: Float {
+        switch self {
+        case .wide: 0.010
+        case .mid: 0.008
+        case .landscape: 0.006
+        }
+    }
+
+    /// Upper end of the soft blur-gate ramp. Above this σ, no attenuation is applied.
+    nonisolated var blurGateHigh: Float {
+        switch self {
+        case .wide: 0.025
+        case .mid: 0.022
+        case .landscape: 0.018
+        }
+    }
+
+    /// Multiplier applied to the combined ISO × resolution blur factor. Landscape damps
+    /// so deep-DoF scenes with real whole-frame detail aren't pre-blurred away.
+    nonisolated var blurDamp: Float {
+        switch self {
+        case .wide, .mid: 1.0
+        case .landscape: 0.8
+        }
+    }
+
+    /// Overrides `config.salientWeight` when non-nil. Landscape reduces to 0.55 so that
+    /// the Vision salient region does not dominate scoring on shots where the whole frame
+    /// carries in-focus detail.
+    nonisolated var salientWeightOverride: Float? {
+        switch self {
+        case .wide, .mid: nil
+        case .landscape: 0.55
+        }
+    }
+
+    /// Derives the hint from an EXIF f-number. Thresholds mirror `ApertureFilter` in
+    /// `SharpnessScoringModel` so the display filter and scoring hint stay in sync.
+    nonisolated static func from(aperture: Double?) -> Self {
+        guard let a = aperture else { return .mid }
+        if a <= 5.6 { return .wide }
+        if a >= 8.0 { return .landscape }
+        return .mid
+    }
 }
 
 // Explicit nonisolated conformance so the @Observable macro's change-tracking
@@ -66,6 +140,7 @@ extension FocusDetectorConfig: Equatable {
             && lhs.subjectSizeFactor == rhs.subjectSizeFactor
             && lhs.enableSubjectClassification == rhs.enableSubjectClassification
             && lhs.afRegionRadius == rhs.afRegionRadius
+            && lhs.apertureHint == rhs.apertureHint
     }
 }
 
@@ -84,23 +159,6 @@ extension FocusDetectorConfig {
         c.subjectSizeFactor = 0.05
         c.enableSubjectClassification = true
         c.afRegionRadius = 0.06
-        return c
-    }
-
-    /// Perched/static wildlife preset.
-    static var perchedWildlife: FocusDetectorConfig {
-        var c = FocusDetectorConfig()
-        c.preBlurRadius = 1.8
-        c.threshold = 0.44
-        c.dilationRadius = 1.0
-        c.erosionRadius = 1.0
-        c.featherRadius = 1.5
-
-        c.borderInsetFraction = 0.04
-        c.salientWeight = 0.70
-        c.subjectSizeFactor = 0.08
-        c.enableSubjectClassification = true
-        c.afRegionRadius = 0.08
         return c
     }
 }
@@ -140,7 +198,7 @@ final class FocusMaskModel: @unchecked Sendable {
                 from: CIImage(cgImage: cgImage),
                 scale: scale,
                 context: context,
-                config: config
+                config: config,
             ) else { return nil }
             return NSImage(cgImage: result, size: originalSize)
         }.value
@@ -155,7 +213,7 @@ final class FocusMaskModel: @unchecked Sendable {
                 from: CIImage(cgImage: cgImage),
                 scale: scale,
                 context: context,
-                config: config
+                config: config,
             )
         }.value
     }
@@ -164,55 +222,36 @@ final class FocusMaskModel: @unchecked Sendable {
         fromRawURL url: URL,
         config: FocusDetectorConfig,
         thumbnailMaxPixelSize: Int = 512,
-        afPoint: CGPoint? = nil
+        afPoint: CGPoint? = nil,
     ) async -> (score: Float?, saliency: SaliencyInfo?) {
-        return await Task.detached(priority: .userInitiated) { [context] in
-            let name = url.lastPathComponent
-            print("[sharpness] \(name) — binary fallback start (maxPx: \(thumbnailMaxPixelSize))")
+        await Task.detached(priority: .userInitiated) { [context] in
             let binaryImg = Self.decodeBinaryFallback(at: url, maxPixelSize: thumbnailMaxPixelSize)
 
             let cgImage: CGImage
             if let img = binaryImg {
-                print("[sharpness] \(name) — binary fallback OK \(img.width)×\(img.height)")
                 cgImage = img
             } else {
-                print("[sharpness] \(name) — binary fallback nil, trying ImageIO")
                 guard let img = Self.decodeThumbnail(at: url, maxPixelSize: thumbnailMaxPixelSize) else {
-                    print("[sharpness] \(name) — both decode paths nil")
                     return (nil, nil)
                 }
-                print("[sharpness] \(name) — ImageIO OK \(img.width)×\(img.height)")
                 cgImage = img
             }
 
-            print("[sharpness] \(name) — saliency start")
             let (region, saliencyInfo) = Self.detectSaliencyAndClassify(
-                for: cgImage, classify: config.enableSubjectClassification)
-            print("[sharpness] \(name) — saliency done, Metal scoring start")
+                for: cgImage, classify: config.enableSubjectClassification,
+            )
             let score = Self.computeSharpnessScalar(
                 from: CIImage(cgImage: cgImage),
                 salientRegion: region,
                 afPoint: afPoint,
                 context: context,
-                config: config
+                config: config,
             )
-            print("[sharpness] \(name) — done, score: \(score.map { String(format: "%.4f", $0) } ?? "nil")")
             return (score, saliencyInfo)
         }.value
     }
 
     // MARK: - Decode helpers
-
-    private nonisolated static func decodeImage(at url: URL) -> CGImage? {
-        let srcOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, srcOptions as CFDictionary) else { return nil }
-
-        let decodeOptions: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceShouldAllowFloat: true
-        ]
-        return CGImageSourceCreateImageAtIndex(source, 0, decodeOptions as CFDictionary)
-    }
 
     private nonisolated static func decodeThumbnail(at url: URL, maxPixelSize: Int) -> CGImage? {
         let srcOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
@@ -245,7 +284,7 @@ final class FocusMaskModel: @unchecked Sendable {
             kCGImageSourceShouldCacheImmediately: true
         ]
         guard let raw = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
-        print("[decode] \(url.lastPathComponent) raw CGImage: \(raw.width)×\(raw.height)  bpc:\(raw.bitsPerComponent)  colorSpace:\(raw.colorSpace?.name as String? ?? "nil")  alphaInfo:\(raw.alphaInfo.rawValue)")
+
         return Self.normalizeToSRGB(raw)
     }
 
@@ -259,7 +298,7 @@ final class FocusMaskModel: @unchecked Sendable {
             data: nil,
             width: image.width, height: image.height,
             bitsPerComponent: 8, bytesPerRow: 0,
-            space: srgb, bitmapInfo: bitmapInfo.rawValue
+            space: srgb, bitmapInfo: bitmapInfo.rawValue,
         ) else { return image }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         return ctx.makeImage() ?? image
@@ -384,22 +423,16 @@ final class FocusMaskModel: @unchecked Sendable {
         salientRegion: CGRect?,
         afPoint: CGPoint?,
         context: CIContext,
-        config: FocusDetectorConfig
+        config: FocusDetectorConfig,
     ) -> Float? {
-        print("[scalar] inputImage extent: \(inputImage.extent)")
-        guard let boosted = buildAmplifiedLaplacian(from: inputImage, config: config) else {
-            print("[scalar] buildAmplifiedLaplacian returned nil")
-            return nil
-        }
+        guard let boosted = buildAmplifiedLaplacian(from: inputImage, config: config) else { return nil }
 
         let extent = boosted.extent
         let width = Int(extent.width)
         let height = Int(extent.height)
-        print("[scalar] boosted extent: \(extent)  width:\(width) height:\(height)")
         guard width > 0, height > 0 else { return nil }
 
         let pixelCount = width * height
-        print("[scalar] allocating \(pixelCount * 4) floats, about to render")
         var rgba = [Float](repeating: 0, count: pixelCount * 4)
         context.render(
             boosted,
@@ -407,12 +440,13 @@ final class FocusMaskModel: @unchecked Sendable {
             rowBytes: width * 16,
             bounds: extent,
             format: .RGBAf,
-            colorSpace: nil
+            colorSpace: nil,
         )
-        print("[scalar] render complete")
 
         @inline(__always)
-        func redAt(_ idx: Int) -> Float { rgba[idx * 4] }
+        func redAt(_ idx: Int) -> Float {
+            rgba[idx * 4]
+        }
 
         // Exclude outer border to avoid Gaussian edge artifacts
         let borderCols = max(0, Int(Float(width) * config.borderInsetFraction))
@@ -433,7 +467,7 @@ final class FocusMaskModel: @unchecked Sendable {
         // Single-pass region analysis: pixel samples + silhouette fraction together.
         struct RegionAnalysis {
             let samples: [Float]
-            let borderFraction: Float  // border energy / total; high => silhouette-dominated
+            let borderFraction: Float // border energy / total; high => silhouette-dominated
         }
 
         func analyzeRegion(_ region: CGRect) -> RegionAnalysis {
@@ -523,58 +557,120 @@ final class FocusMaskModel: @unchecked Sendable {
             }
         }
 
-        let effectiveSubjectScore = afScore ?? salientScore
+        // AF and saliency both signal "where the subject is" but with different confidence
+        // characteristics: AF is camera-provided ground truth for where focus was attempted;
+        // Vision saliency is a perceptual model. Blending keeps both signals in the mix
+        // rather than AF silently overriding saliency (the earlier `afScore ?? salientScore`
+        // behaviour), which occasionally mis-ranked when the AF point landed on a secondary
+        // subject while Vision correctly identified the main one.
+        let effectiveSubjectScore: Float? = switch (afScore, salientScore) {
+        case let (a?, s?): a * 0.6 + s * 0.4
+        case let (a?, nil): a
+        case let (nil, s?): s
+        default: nil
+        }
+        // Prefer AF analysis for micro-contrast / silhouette because the AF region is
+        // usually tighter than the Vision salient union.
         let effectiveAnalysis = afAnalysis ?? salientAnalysis
 
-        // HARD BLUR GATE: if subject micro-detail is too low, clamp score down
+        // Soft blur gate: subject-region σ below blurGateLow → multiplier 0.20,
+        // above blurGateHigh → 1.0, linearly ramped in between. Replaces an earlier
+        // hard σ<0.014 → ×0.12 cliff that false-positived on low-contrast subjects
+        // (white bird against white sky, fog, plain-backdrop portraits).
         let subjectMicro = effectiveAnalysis.map { Self.microContrast($0.samples) } ?? 0
-        let blurGate: Float = 0.014
-        if let ea = effectiveAnalysis, ea.samples.count >= 64, subjectMicro < blurGate {
-            return max(0.01, (effectiveSubjectScore ?? fullScore ?? 0) * 0.12)
+        let hint = config.apertureHint
+        let blurAttenuation: Float
+        if let ea = effectiveAnalysis, ea.samples.count >= 64 {
+            let lo = hint.blurGateLow
+            let hi = hint.blurGateHigh
+            let span = max(hi - lo, 1e-6)
+            let t = min(max((subjectMicro - lo) / span, 0), 1)
+            blurAttenuation = 0.20 + t * 0.80
+        } else {
+            blurAttenuation = 1.0
         }
 
+        // Landscape (deep DoF) pulls the salient weight down so the full-frame score
+        // is not dominated by the Vision salient region on scenes where the whole
+        // frame carries real in-focus detail.
+        let salientWeight = hint.salientWeightOverride ?? config.salientWeight
+
+        let base: Float?
         switch (fullScore, effectiveSubjectScore) {
         case let (f?, s?):
-            let w = config.salientWeight
-            var blended = f * (1.0 - w) + s * w
+            var blended = f * (1.0 - salientWeight) + s * salientWeight
 
-            // Silhouette penalty
+            // Silhouette penalty: if >62% of the subject-region edge energy sits in its
+            // outer 12% border, we're measuring the silhouette rim rather than subject
+            // detail (common on backlit wildlife). Reduce the score by up to 55%.
             if let ea = effectiveAnalysis {
                 let frac = ea.borderFraction
-                let t: Float = 0.62
-                if frac > t {
-                    let over = min(1.0, (frac - t) / (1.0 - t))
+                let silhouetteT: Float = 0.62
+                if frac > silhouetteT {
+                    let over = min(1.0, (frac - silhouetteT) / (1.0 - silhouetteT))
                     blended *= 1.0 - 0.55 * over
                 }
             }
 
-            // Subject-size bonus only for Vision saliency region (not AF)
+            // Subject-size bonus only for Vision saliency (not AF): when the AF point is
+            // present we already have a high-confidence subject locus, so the
+            // subject-area nudge would double-count.
             if afRegionUsed == nil, let region = salientRegion {
                 let area = Float(region.width * region.height)
                 blended *= 1.0 + area * config.subjectSizeFactor
             }
 
-            return blended
+            base = blended
 
         case let (f?, nil):
-            let p = (1.0 - config.salientWeight)
-            return f * p * p * p
+            // Full-frame score but no subject locus: cube-of-(1-salientWeight) penalizes
+            // heavily because for a wildlife-first app, "no detectable subject" usually
+            // means the Vision saliency pass failed on a messy / low-contrast frame. The
+            // landscape hint softens this via the reduced salientWeight override.
+            let p = 1.0 - salientWeight
+            base = f * p * p * p
 
         case let (nil, s?):
-            return s
+            base = s
 
         default:
-            return nil
+            base = nil
         }
+
+        guard let baseScore = base else { return nil }
+        return baseScore * blurAttenuation
     }
 
     // MARK: - Mask generation
 
+    /// ISO→blur multiplier. Piecewise-linear: flat below ISO 800 (A1 / A1 II base is
+    /// clean at low ISO), gentle rise 1.0→1.6 through ISO 3200, then a shallow tail to a
+    /// cap of 2.2 at ~ISO 9600+. Replaces an earlier `sqrt(iso/400)` clamped to 3.0, which
+    /// over-blurred real fine detail at ISO 6400+ on Sony A1-series bodies where noise is
+    /// still well-controlled. The robust p90–p97 tail mean in `robustTailScore` already
+    /// tolerates sparse noise, so the previous aggressive cap wasn't needed.
+    nonisolated static func isoScalingFactor(iso: Int) -> Float {
+        let i = Float(max(iso, 100))
+        switch i {
+        case ..<800:
+            return 1.0
+
+        case 800 ..< 3200:
+            return 1.0 + (i - 800) / 2400 * 0.6
+
+        default:
+            return min(1.6 + (i - 3200) / 6400 * 0.6, 2.2)
+        }
+    }
+
     private nonisolated static func buildAmplifiedLaplacian(from image: CIImage, config: FocusDetectorConfig) -> CIImage? {
-        let isoFactor = max(1.0, min(sqrt(Float(max(config.iso, 1)) / 400.0), 3.0))
+        let isoFactor = Self.isoScalingFactor(iso: config.iso)
         let imageWidth = Float(image.extent.width)
         let resFactor = max(1.0, min(sqrt(max(imageWidth, 512.0) / 512.0), 3.0))
-        let effectiveRadius = min(config.preBlurRadius * isoFactor * resFactor, 100.0)
+        // Landscape (deep DoF) damps the combined ISO × resolution blur so the whole-
+        // frame edge energy isn't smoothed away before the Laplacian fires.
+        let blurDamp = config.apertureHint.blurDamp
+        let effectiveRadius = min(config.preBlurRadius * isoFactor * resFactor * blurDamp, 100.0)
 
         let preBlur = CIFilter.gaussianBlur()
         preBlur.inputImage = image
@@ -585,7 +681,7 @@ final class FocusMaskModel: @unchecked Sendable {
         guard let laplacianOutput = kernel.apply(
             extent: smoothed.extent.insetBy(dx: 1, dy: 1),
             roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
-            arguments: [smoothed]
+            arguments: [smoothed],
         ) else { return nil }
 
         let boost = CIFilter.colorMatrix()
@@ -601,7 +697,7 @@ final class FocusMaskModel: @unchecked Sendable {
         from inputImage: CIImage,
         scale: CGFloat,
         context: CIContext,
-        config: FocusDetectorConfig
+        config: FocusDetectorConfig,
     ) -> CGImage? {
         let scaledImage = inputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         guard let rawLaplacian = Self.buildAmplifiedLaplacian(from: scaledImage, config: config) else { return nil }
@@ -702,7 +798,7 @@ extension FocusMaskModel {
         thresholdPercentile: Float = 0.90,
         targetP95AfterGain: Float = 0.50,
         minSamples: Int = 5,
-        maxConcurrentTasks: Int = 8
+        maxConcurrentTasks: Int = 8,
     ) async -> FocusCalibrationResult? {
         let base = config
         guard let result = await calibrateFromBurstParallel(
@@ -712,7 +808,7 @@ extension FocusMaskModel {
             thresholdPercentile: thresholdPercentile,
             targetP95AfterGain: targetP95AfterGain,
             minSamples: minSamples,
-            maxConcurrentTasks: maxConcurrentTasks
+            maxConcurrentTasks: maxConcurrentTasks,
         ) else { return nil }
 
         applyCalibration(result)
@@ -726,7 +822,7 @@ extension FocusMaskModel {
         thresholdPercentile: Float = 0.90,
         targetP95AfterGain: Float = 0.50,
         minSamples: Int = 5,
-        maxConcurrentTasks: Int = 8
+        maxConcurrentTasks: Int = 8,
     ) async -> FocusCalibrationResult? {
         guard !files.isEmpty else { return nil }
 
@@ -751,7 +847,7 @@ extension FocusMaskModel {
                     let result = await self.computeSharpnessScore(
                         fromRawURL: entry.url,
                         config: fileConfig,
-                        thumbnailMaxPixelSize: tSize
+                        thumbnailMaxPixelSize: tSize,
                     )
                     return result.score
                 }
@@ -772,7 +868,7 @@ extension FocusMaskModel {
                         let result = await self.computeSharpnessScore(
                             fromRawURL: entry.url,
                             config: fileConfig,
-                            thumbnailMaxPixelSize: tSize
+                            thumbnailMaxPixelSize: tSize,
                         )
                         return result.score
                     }
@@ -807,7 +903,7 @@ extension FocusMaskModel {
             p50: p50,
             p90: p90,
             p95: p95,
-            p99: p99
+            p99: p99,
         )
     }
 }

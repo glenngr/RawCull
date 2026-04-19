@@ -45,10 +45,8 @@ struct ThumbnailImageView: View {
             guard url != nil || file != nil else { return }
             isLoading = true
             let loadedImage = await loadThumbnail()
-            await MainActor.run {
-                thumbnailImage = loadedImage
-                imageBinding?.wrappedValue = loadedImage
-            }
+            thumbnailImage = loadedImage
+            imageBinding?.wrappedValue = loadedImage
             isLoading = false
         }
     }
@@ -90,7 +88,7 @@ struct ThumbnailImageView: View {
     private func loadThumbnail() async -> NSImage? {
         switch style {
         case .grid:
-            if let file { return await ThumbnailLoader.shared.thumbnailLoader(file: file) }
+            if let file { return await ThumbnailLoader.shared.thumbnailLoader(file: file, targetSize: targetSize) }
             return nil
 
         case .list:

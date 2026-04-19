@@ -11,6 +11,7 @@ extension RawCullViewModel {
 
         // Discard sharpness data and filters from the previous catalog
         sharpnessModel.reset()
+        similarityModel.reset()
         ratingFilter = .all
 
         let scan = ScanFiles()
@@ -54,8 +55,6 @@ extension RawCullViewModel {
 
         if !processedURLs.contains(url) {
             processedURLs.insert(url)
-            creatingthumbnails = true
-
             let settingsmanager = await SettingsViewModel.shared.asyncgetsettings()
             let thumbnailSizePreview = settingsmanager.thumbnailSizePreview
 
@@ -64,6 +63,7 @@ extension RawCullViewModel {
                 maxfilesHandler: maxfilesHandler,
                 estimatedTimeHandler: estimatedTimeHandler,
                 memorypressurewarning: memorypressurewarning,
+                onExtractionNeeded: extractionNeeded,
             )
 
             let scanAndCreateThumbnails = ScanAndCreateThumbnails()
@@ -101,7 +101,9 @@ extension RawCullViewModel {
 
     // MARK: - Helpers
 
-    /// Applies the active rating filter, aperture filter, and sharpness sort to a pre-sorted file list.
+    /// Applies the active rating filter, aperture filter, and sharpness sort to a pre-sorted
+    /// file list. When similarity mode is active, similarity sort runs last and takes precedence
+    /// over sharpness sort, with the anchor image always ranked first.
     private func applyFilters(to files: [FileItem]) -> [FileItem] {
         var result = files
         if ratingFilter != .all {
@@ -118,6 +120,20 @@ extension RawCullViewModel {
         if let label = sharpnessModel.saliencyCategoryFilter {
             let info = sharpnessModel.saliencyInfo
             result = result.filter { info[$0.id]?.subjectLabel == label }
+        }
+        // Similarity sort takes precedence over sharpness sort when active.
+        if similarityModel.sortBySimilarity, !similarityModel.distances.isEmpty {
+            let distances = similarityModel.distances
+            let anchorID = similarityModel.anchorFileID
+            result.sort { lhs, rhs in
+                // Anchor image always sorts first; use stable tie-breaking by name.
+                if lhs.id == anchorID { return true }
+                if rhs.id == anchorID { return false }
+                let dl = distances[lhs.id] ?? .greatestFiniteMagnitude
+                let dr = distances[rhs.id] ?? .greatestFiniteMagnitude
+                if dl != dr { return dl < dr }
+                return lhs.name < rhs.name
+            }
         }
         return result
     }

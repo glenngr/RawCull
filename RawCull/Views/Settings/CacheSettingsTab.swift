@@ -17,6 +17,7 @@ struct CacheSettingsTab: View {
     @State private var showPruneConfirmation = false
     @State private var showSaveSettingsConfirmation = false
     @State private var currentDiskCacheSize: Int = 0
+    @State private var currentGridCacheSize: Int = 0
     @State private var isLoadingDiskCacheSize = false
     @State private var isPruningDiskCache = false
 
@@ -66,25 +67,68 @@ struct CacheSettingsTab: View {
                                 }
                             }
 
+                            HStack(spacing: 16) {
+                                // Grid Cache Size (200px thumbnails)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "square.grid.2x2")
+                                            .font(.system(size: 10, weight: .medium))
+                                        Text("Grid cache (200px)")
+                                            .font(.system(size: 10, weight: .medium))
+                                        Spacer()
+                                        Text("Approx 200px thumbnails: " +
+                                            gridDisplayValue(for: settingsManager.gridCacheSizeMB))
+                                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    }
+                                    Slider(
+                                        value: Binding<Double>(
+                                            get: { Double(settingsManager.gridCacheSizeMB) },
+                                            set: { settingsManager.gridCacheSizeMB = Int($0) },
+                                        ),
+                                        in: 400 ... 1000,
+                                        step: 50,
+                                    )
+                                    .frame(height: 18)
+                                }
+                            }
+
                             // Current Disk Cache Size
                             SettingsCard {
-                                HStack(spacing: 8) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "internaldrive")
-                                            .font(.system(size: 12, weight: .medium))
-                                        Text("Current use: ")
-                                            .font(.system(size: 12, weight: .medium))
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(spacing: 8) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "internaldrive")
+                                                .font(.system(size: 12, weight: .medium))
+                                            Text("Current use: ")
+                                                .font(.system(size: 12, weight: .medium))
 
-                                        if isLoadingDiskCacheSize {
-                                            ProgressView()
-                                                .fixedSize()
-                                        } else {
-                                            Text(formatBytes(currentDiskCacheSize))
-                                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            if isLoadingDiskCacheSize {
+                                                ProgressView()
+                                                    .fixedSize()
+                                            } else {
+                                                Text(formatBytes(currentDiskCacheSize))
+                                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            }
                                         }
+
+                                        Spacer()
                                     }
 
-                                    Spacer()
+                                    HStack(spacing: 8) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "memorychip")
+                                                .font(.system(size: 12, weight: .medium))
+                                            Text("Grid cache (200px): ")
+                                                .font(.system(size: 12, weight: .medium))
+                                            Text(formatBytes(currentGridCacheSize))
+                                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            Text("/ \(formatBytes(SharedMemoryCache.shared.gridThumbnailCache.totalCostLimit))")
+                                                .font(.system(size: 12, weight: .regular))
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Spacer()
+                                    }
                                 }
                             }
 
@@ -186,6 +230,11 @@ struct CacheSettingsTab: View {
                 cacheConfig = await SharedMemoryCache.shared.getCacheCostsAfterSettingsUpdate()
                 // await updateImageCapacity()
             }
+            .task(id: settingsManager.gridCacheSizeMB) {
+                await SharedMemoryCache.shared.refreshConfig()
+                cacheConfig = await SharedMemoryCache.shared.getCacheCostsAfterSettingsUpdate()
+                currentGridCacheSize = SharedMemoryCache.shared.getGridCacheCurrentCost()
+            }
             .task(id: settingsManager.thumbnailCostPerPixel) {
                 await SharedMemoryCache.shared.setCacheCostsFromSavedSettings()
                 await SharedMemoryCache.shared.setCostPerPixel(settingsManager.thumbnailCostPerPixel)
@@ -202,9 +251,11 @@ struct CacheSettingsTab: View {
     private func refreshDiskCacheSize() {
         isLoadingDiskCacheSize = true
         Task {
-            let size = await SharedMemoryCache.shared.getDiskCacheSize()
+            let diskSize = await SharedMemoryCache.shared.getDiskCacheSize()
+            let gridSize = SharedMemoryCache.shared.getGridCacheCurrentCost()
             await MainActor.run {
-                currentDiskCacheSize = size
+                currentDiskCacheSize = diskSize
+                currentGridCacheSize = gridSize
                 isLoadingDiskCacheSize = false
             }
         }
@@ -226,6 +277,14 @@ struct CacheSettingsTab: View {
     private func formatBytes(_ bytes: Int) -> String {
         if bytes == 0 { return "0 B" }
         return ByteCountFormatStyle(style: .memory).format(Int64(bytes))
+    }
+
+    private func gridDisplayValue(for megabytes: Int) -> String {
+        let bytes = megabytes * 1024 * 1024
+        let s = settingsManager.thumbnailSizeGrid
+        let costPerImage = s * s * settingsManager.thumbnailCostPerPixel
+        guard costPerImage > 0 else { return "0" }
+        return String(max(1, bytes / costPerImage))
     }
 
     private func displayValue(for megabytes: Int) -> String {

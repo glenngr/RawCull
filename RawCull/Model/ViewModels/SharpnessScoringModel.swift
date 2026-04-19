@@ -12,14 +12,18 @@ enum ApertureFilter: String, CaseIterable, Identifiable {
     case wide = "Wide (≤ f/5.6)"
     case landscape = "Landscape (≥ f/8)"
 
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     func matches(_ file: FileItem) -> Bool {
         switch self {
         case .all:
             true
+
         case .wide:
             file.exifData?.apertureValue.map { $0 <= 5.6 } ?? false
+
         case .landscape:
             file.exifData?.apertureValue.map { $0 >= 8.0 } ?? false
         }
@@ -28,12 +32,14 @@ enum ApertureFilter: String, CaseIterable, Identifiable {
 
 @Observable @MainActor
 final class SharpnessScoringModel {
-    enum ShootingMode {
-        case birdsInFlight
-        case perchedWildlife
+    /// Sharpness scores keyed by FileItem.id. Wholesale-replaced at the end
+    /// of a scoring run; incremental inserts happen only when loading
+    /// persisted scores. `didSet` refreshes `maxScore` so read sites in view
+    /// bodies are O(1) instead of re-sorting the full score set per cell.
+    var scores: [UUID: Float] = [:] {
+        didSet { recomputeMaxScore() }
     }
 
-    var scores: [UUID: Float] = [:]
     var saliencyInfo: [UUID: SaliencyInfo] = [:]
     var isScoring: Bool = false
     var sortBySharpness: Bool = false
@@ -50,13 +56,24 @@ final class SharpnessScoringModel {
     var scoringTotal: Int = 0
     var scoringEstimatedSeconds: Int = 0
 
-    var maxScore: Float {
-        guard scores.count >= 2 else { return scores.values.first ?? 1.0 }
+    /// Normalization denominator for sharpness badges / percentiles. Stored
+    /// (not computed) so each ImageItemView read is O(1); recomputed only on
+    /// `scores` mutation via `didSet`.
+    private(set) var maxScore: Float = 1.0
+
+    private func recomputeMaxScore() {
+        guard scores.count >= 2 else {
+            maxScore = scores.values.first ?? 1.0
+            return
+        }
         var sorted = Array(scores.values)
         sorted.sort()
-        guard sorted.count >= 10 else { return max(sorted.last ?? 1e-6, 1e-6) }
+        guard sorted.count >= 10 else {
+            maxScore = max(sorted.last ?? 1e-6, 1e-6)
+            return
+        }
         let k = Int(Float(sorted.count - 1) * 0.90)
-        return max(sorted[k], 1e-6)
+        maxScore = max(sorted[k], 1e-6)
     }
 
     private var _scoringTask: Task<Void, Never>?
@@ -65,15 +82,6 @@ final class SharpnessScoringModel {
     init() {
         // Default mode for wildlife
         focusMaskModel.config = .birdsInFlight
-    }
-
-    func applyMode(_ mode: ShootingMode) {
-        switch mode {
-        case .birdsInFlight:
-            focusMaskModel.config = .birdsInFlight
-        case .perchedWildlife:
-            focusMaskModel.config = .perchedWildlife
-        }
     }
 
     func reset() {
@@ -96,7 +104,6 @@ final class SharpnessScoringModel {
     }
 
     func calibrateFromBurst(_ files: [FileItem]) async {
-        print("[calib] calibrateFromBurst START — \(files.count) files, thumbPx: \(thumbnailMaxPixelSize)")
         isCalibratingSharpnessScoring = true
         let fileEntries = files.map { (url: $0.url, iso: $0.exifData?.isoValue) }
 
@@ -104,15 +111,13 @@ final class SharpnessScoringModel {
             files: fileEntries,
             thumbnailMaxPixelSize: thumbnailMaxPixelSize,
             minSamples: 5,
-            maxConcurrentTasks: 8
+            maxConcurrentTasks: 8,
         ) else {
-            print("[calib] calibrateFromBurst FAILED (too few samples)")
             Logger.process.warning("SharpnessScoringModel: calibration failed (too few scoreable images)")
             isCalibratingSharpnessScoring = false
             return
         }
 
-        print("[calib] calibrateFromBurst DONE — threshold: \(result.threshold), gain: \(result.energyMultiplier), n=\(result.sampleCount)")
         Logger.process.debugMessageOnly("SharpnessScoringModel: calibration applied — threshold: \(result.threshold), gain: \(result.energyMultiplier), n=\(result.sampleCount)")
         Logger.process.debugMessageOnly("  p50: \(result.p50)  p90: \(result.p90)  p95: \(result.p95)  p99: \(result.p99)")
         isCalibratingSharpnessScoring = false
@@ -144,15 +149,17 @@ final class SharpnessScoringModel {
                     let id = file.id
                     let iso = file.exifData?.isoValue ?? 400
                     let afPoint = file.afFocusNormalized
+                    let hint = FocusDetectorConfig.ApertureHint.from(aperture: file.exifData?.apertureValue)
 
                     group.addTask(priority: .userInitiated) {
                         var fileConfig = config
                         fileConfig.iso = iso
+                        fileConfig.apertureHint = hint
                         let result = await model.computeSharpnessScore(
                             fromRawURL: url,
                             config: fileConfig,
                             thumbnailMaxPixelSize: thumbSize,
-                            afPoint: afPoint
+                            afPoint: afPoint,
                         )
                         return (id, result.score, result.saliency)
                     }
@@ -183,15 +190,17 @@ final class SharpnessScoringModel {
                         let id = file.id
                         let iso = file.exifData?.isoValue ?? 400
                         let afPoint = file.afFocusNormalized
+                        let hint = FocusDetectorConfig.ApertureHint.from(aperture: file.exifData?.apertureValue)
 
                         group.addTask(priority: .userInitiated) {
                             var fileConfig = config
                             fileConfig.iso = iso
+                            fileConfig.apertureHint = hint
                             let result = await model.computeSharpnessScore(
                                 fromRawURL: url,
                                 config: fileConfig,
                                 thumbnailMaxPixelSize: thumbSize,
-                                afPoint: afPoint
+                                afPoint: afPoint,
                             )
                             return (id, result.score, result.saliency)
                         }
@@ -219,7 +228,7 @@ final class SharpnessScoringModel {
     func applyPreloadedScores(
         _ files: [FileItem],
         preloadedScores: [UUID: Float],
-        preloadedSaliency: [UUID: SaliencyInfo]
+        preloadedSaliency: [UUID: SaliencyInfo],
     ) {
         guard !files.isEmpty else {
             sortBySharpness = false

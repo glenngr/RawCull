@@ -1,5 +1,5 @@
 //
-//  TaggedPhotoItemView.swift
+//  RatedPhotoItemView.swift
 //  RawCull
 //
 //  Created by Thomas Evensen on 21/01/2026.
@@ -8,7 +8,7 @@
 import OSLog
 import SwiftUI
 
-struct TaggedPhotoItemView: View {
+struct RatedPhotoItemView: View {
     private var settings: SettingsViewModel {
         SettingsViewModel.shared
     }
@@ -19,6 +19,7 @@ struct TaggedPhotoItemView: View {
     let photoURL: URL? // file URL — used only for thumbnail display
     let catalogURL: URL? // catalog (directory) URL — used for model lookups
     var onSelected: () -> Void = {}
+    var onDoubleSelected: () -> Void = {}
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -57,9 +58,9 @@ struct TaggedPhotoItemView: View {
                 }
             }
         }
-        .onTapGesture {
-            onSelected()
-        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { onDoubleSelected() }
+        .onTapGesture(count: 1) { onSelected() }
         .onDisappear {
             // Cancel loading when scrolled out of view
             if let url = photoURL {

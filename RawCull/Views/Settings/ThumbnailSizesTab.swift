@@ -40,19 +40,6 @@ struct ThumbnailSizesTab: View {
                             step: 10,
                         )
 
-                        SettingsSliderRow(
-                            title: "Thumbnail Size Grid View",
-                            systemImage: "square.grid.2x2",
-                            valueText: "\(settingsManager.thumbnailSizeGridView) px",
-                            description: "Thumbnail size in the grid window",
-                            value: Binding<Double>(
-                                get: { Double(settingsManager.thumbnailSizeGridView) },
-                                set: { settingsManager.thumbnailSizeGridView = Int($0) },
-                            ),
-                            range: 200 ... 500,
-                            step: 50,
-                        )
-
                         // Preview Size
                         SettingsSliderRow(
                             title: "Preview Thumbnail Size",
@@ -63,7 +50,7 @@ struct ThumbnailSizesTab: View {
                                 get: { Double(settingsManager.thumbnailSizePreview) },
                                 set: { settingsManager.thumbnailSizePreview = Int($0) },
                             ),
-                            range: 1024 ... 2048,
+                            range: 1024 ... 1664,
                             step: 128,
                         )
 

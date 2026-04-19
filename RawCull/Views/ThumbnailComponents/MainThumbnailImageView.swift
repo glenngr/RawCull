@@ -7,10 +7,6 @@ struct MainThumbnailImageView: View {
         viewModel.getFocusPoints()
     }
 
-    @Binding var scale: CGFloat
-    @Binding var lastScale: CGFloat
-    @Binding var offset: CGSize
-
     let url: URL
     let file: FileItem?
 
@@ -18,19 +14,12 @@ struct MainThumbnailImageView: View {
     @State private var thumbnailSizePreview: Int?
 
     @State private var showFocusPoints = false
-    @State private var markerSize: CGFloat = 40
 
     // Focus mask state
     @State private var focusMask: NSImage?
     @State private var showFocusMask: Bool = false
-    @State private var overlayOpacity: Double = 0.95
     @State private var maskTask: Task<Void, Never>?
-    @State private var controlsCollapsed: Bool = false
     @FocusState private var isImageFocused: Bool
-
-    private var focusMaskSlidersVisible: Bool {
-        showFocusMask && !controlsCollapsed
-    }
 
     var body: some View {
         @Bindable var vm = viewModel
@@ -48,23 +37,23 @@ struct MainThumbnailImageView: View {
                                 contentMode: .fit,
                                 image: $image,
                             )
-                            .scaleEffect(scale)
-                            .offset(offset)
+                            .scaleEffect(viewModel.scale)
+                            .offset(viewModel.offset)
                             .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
                             .gesture(
                                 MagnifyGesture()
                                     .onChanged { value in
-                                        scale = lastScale * value.magnification
+                                        viewModel.scale = viewModel.lastScale * value.magnification
                                     }
                                     .onEnded { _ in
-                                        lastScale = scale
+                                        viewModel.lastScale = viewModel.scale
                                     },
                             )
                             .simultaneousGesture(
                                 DragGesture()
                                     .onChanged { value in
-                                        if scale > 1.0 {
-                                            offset = CGSize(
+                                        if viewModel.scale > 1.0 {
+                                            viewModel.offset = CGSize(
                                                 width: value.translation.width,
                                                 height: value.translation.height,
                                             )
@@ -80,30 +69,30 @@ struct MainThumbnailImageView: View {
                                     .resizable()
                                     .scaledToFit()
                                     .frame(width: geo.size.width, height: geo.size.height)
-                                    .scaleEffect(scale)
-                                    .offset(offset)
+                                    .scaleEffect(viewModel.scale)
+                                    .offset(viewModel.offset)
                                     .blendMode(.screen)
-                                    .opacity(overlayOpacity)
+                                    .opacity(0.95)
                                     .allowsHitTesting(false)
                                     .transition(.opacity)
                             }
 
                             // 3️⃣ Focus points overlay
-                            if showFocusPoints, let focusPoints, !focusMaskSlidersVisible {
+                            if showFocusPoints, let focusPoints {
                                 FocusOverlayView(
                                     focusPoints: focusPoints,
                                     imageSize: image?.size,
-                                    markerSize: markerSize,
+                                    markerSize: viewModel.focusPointMarkerSize,
                                 )
-                                .scaleEffect(scale)
-                                .offset(offset)
+                                .scaleEffect(viewModel.scale)
+                                .offset(viewModel.offset)
                                 .allowsHitTesting(false)
                                 .transition(.opacity.combined(with: .blurReplace))
                             }
 
                             VStack {
                                 // File metadata at the top where it belongs
-                                if let file, !focusMaskSlidersVisible {
+                                if let file {
                                     HStack {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(file.name)
@@ -125,13 +114,9 @@ struct MainThumbnailImageView: View {
 
                                 ImageOverlayControlsView(
                                     showFocusMask: $showFocusMask,
-                                    config: $vm.sharpnessModel.focusMaskModel.config,
-                                    overlayOpacity: $overlayOpacity,
-                                    controlsCollapsed: $controlsCollapsed,
                                     focusMaskAvailable: focusMask != nil,
                                     hasFocusPoints: focusPoints != nil,
                                     showFocusPoints: $showFocusPoints,
-                                    markerSize: $markerSize,
                                     scale: viewModel.scale,
                                     canZoomOut: viewModel.scale > 0.5,
                                     canZoomIn: viewModel.scale < 4.0,
@@ -150,15 +135,15 @@ struct MainThumbnailImageView: View {
                             switch press.characters {
                             case "+":
                                 withAnimation(.spring()) {
-                                    scale = min(4.0, scale + 0.2)
-                                    lastScale = scale
+                                    viewModel.scale = min(4.0, viewModel.scale + 0.2)
+                                    viewModel.lastScale = viewModel.scale
                                 }
                                 return .handled
 
                             case "-":
                                 withAnimation(.spring()) {
-                                    scale = max(0.5, scale - 0.2)
-                                    lastScale = scale
+                                    viewModel.scale = max(0.5, viewModel.scale - 0.2)
+                                    viewModel.lastScale = viewModel.scale
                                 }
                                 return .handled
 

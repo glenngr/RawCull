@@ -13,37 +13,12 @@ extension RawCullMainView {
     var toolbarContent: some ToolbarContent {
         SharedMainToolbarContent(
             viewModel: viewModel,
-            isHorizontal: false,
-            toggleLayout: toggleshowvertical,
             toggleInspector: toggleShowInspector,
-            openGridThumbnail: openGridThumbnailWindow,
         )
     }
 
     func toggleShowInspector() {
         viewModel.hideInspector.toggle()
-    }
-
-    func toggleshowvertical() {
-        showhorizontalthumbnailview.toggle()
-    }
-
-    func openGridThumbnailWindow() {
-        viewModel.ratingFilter = .all
-        Task(priority: .background) { await viewModel.handleSortOrderChange() }
-        gridthumbnailviewmodel.open(
-            cullingModel: viewModel.cullingModel,
-            selectedSource: viewModel.selectedSource,
-            filteredFiles: viewModel.filteredFiles,
-        )
-        showGridThumbnail = true
-    }
-
-    func handleToggleSelection(for file: FileItem) {
-        Task {
-            viewModel.selectFile(file)
-            await viewModel.toggleTag(for: file)
-        }
     }
 
     func handlePickerResult(_ result: Result<URL, Error>) {
@@ -59,7 +34,7 @@ extension RawCullMainView {
         }
     }
 
-    func extractAllJPGS() {
+    func extractFilteredFilesJPGS() {
         Task {
             // Using the same property to start the progressview.
             // The text in the Progress is computed to check which
@@ -71,14 +46,14 @@ extension RawCullMainView {
                 maxfilesHandler: viewModel.maxfilesHandler,
                 estimatedTimeHandler: viewModel.estimatedTimeHandler,
                 memorypressurewarning: { _ in },
+                onExtractionNeeded: {},
             )
 
-            let extract = ExtractAndSaveJPGs()
+            let extract = ExtractAndSaveJPGs(sortedfiles: viewModel.filteredFiles)
             await extract.setFileHandlers(handlers)
             viewModel.currentExtractAndSaveJPGsActor = extract
 
-            guard let url = viewModel.selectedSource?.url else { return }
-            await extract.extractAndSaveAlljpgs(from: url)
+            await extract.extractAndSavejpgs()
 
             viewModel.currentExtractAndSaveJPGsActor = nil // ← NEW: clean up
             viewModel.creatingthumbnails = false

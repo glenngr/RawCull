@@ -15,6 +15,25 @@ enum RatingFilter: Hashable {
     case stars(Int) // rating == n, n in 2...5
 }
 
+enum MainViewMode: String, CaseIterable, Identifiable {
+    case loupe
+    case grid
+    case ratedGrid
+
+    var id: String {
+        rawValue
+    }
+}
+
+enum ActiveSheet: String, Identifiable {
+    case stats
+    case scoringParams
+
+    var id: String {
+        rawValue
+    }
+}
+
 @Observable @MainActor
 final class RawCullViewModel {
     /// Remember previous selected source to avoid a new rescan of
@@ -31,7 +50,10 @@ final class RawCullViewModel {
     var sortOrder = [KeyPathComparator(\FileItem.name)]
     var isShowingPicker = false
     var hideInspector = true
-    var selectedFile: FileItem?
+    var selectedFile: FileItem? {
+        files.first { $0.id == selectedFileID }
+    }
+
     var selectedFileIDs: Set<FileItem.ID> = []
     var issorting: Bool = false
     var progress: Double = 0
@@ -41,7 +63,6 @@ final class RawCullViewModel {
     var scanning: Bool = true
     var showingAlert: Bool = false
 
-    var focustagimage: Bool = false
     var focusaborttask: Bool = false
     var focusExtractJPGs: Bool = false
 
@@ -54,13 +75,22 @@ final class RawCullViewModel {
     // Zoom window state
     var zoomCGImageWindowFocused: Bool = false
     var zoomNSImageWindowFocused: Bool = false
-    var pendingCGImageUpdate: CGImage?
-    var pendingNSImageUpdate: NSImage?
+
+    /// Main content mode — drives which view fills the main window.
+    var mainViewMode: MainViewMode = .loupe
+
+    // In-window zoom overlay (replaces the old separate zoom windows).
+    var zoomOverlayVisible: Bool = false
+    var zoomOverlayCGImage: CGImage?
+    var zoomOverlayNSImage: NSImage?
 
     // Thumbnail preview zoom state
     var scale: CGFloat = 1.0
     var lastScale: CGFloat = 1.0
     var offset: CGSize = .zero
+
+    /// Focus point marker size — shared across all overlay views and the Focus settings tab
+    var focusPointMarkerSize: CGFloat = 40
 
     /// This is the only place CullingModel is initialised.
     var cullingModel = CullingModel()
@@ -68,6 +98,9 @@ final class RawCullViewModel {
     /// Single shared instance — config changes here affect both the zoom
     /// overlay and the sharpness scoring pipeline.
     var sharpnessModel = SharpnessScoringModel()
+
+    /// Similarity scoring model — Vision feature-print embeddings and distance ranking.
+    var similarityModel = SimilarityScoringModel()
 
     /// URLs for which startAccessingSecurityScopedResource() has been called.
     /// Stopped in deinit to pair every start with a stop.
@@ -91,12 +124,19 @@ final class RawCullViewModel {
 
     var showSavedFiles: Bool = false
 
+    /// Sheet currently presented from the main window toolbar
+    /// (Scoring Parameters / Scan Statistics). Nil when no sheet is shown.
+    var activeSheet: ActiveSheet?
+
     /// Closure to count scanning files
     var countingScannedFiles: (@Sendable (Int) -> Void)?
 
     var currentScanAndCreateThumbnailsActor: ScanAndCreateThumbnails?
     var currentExtractAndSaveJPGsActor: ExtractAndSaveJPGs?
     var preloadTask: Task<Void, Never>?
+    /// In-flight ARW→JPEG extraction or thumbnail load task for the zoom window.
+    /// Cancelled when the zoom window closes or a new file is opened for zoom.
+    var zoomExtractionTask: Task<Void, Never>?
 
     // MARK: - Computed
 
@@ -131,7 +171,6 @@ final class RawCullViewModel {
     // MARK: - File Selection
 
     func selectFile(_ file: FileItem) {
-        selectedFile = file
         selectedFileID = file.id
     }
 
