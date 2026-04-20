@@ -65,8 +65,6 @@ enum JPGNikonNEFExtractor {
                         let decodeOptions = [kCGImageSourceShouldCache: false] as CFDictionary
                         imageIOResult = CGImageSourceCreateImageAtIndex(imageSource, targetIndex, decodeOptions)
                     }
-                } else {
-                    Logger.process.warning("JPGNikonNEFExtractor: no embedded JPEG found via ImageIO — trying binary fallback")
                 }
 
                 for i in 0 ..< imageCount {
