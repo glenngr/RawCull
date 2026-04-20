@@ -2,10 +2,11 @@
 //  JPGNikonNEFExtractor.swift
 //  RawCull
 //
-//  Extracts the largest embedded JPEG from a Nikon NEF using ImageIO.
-//  Mirrors the shape of `JPGSonyARWExtractor`. No binary fallback is
-//  needed for macOS 26 on Z-series and D850+ bodies, whose NEF is fully
-//  supported by the system RAW pipeline.
+//  Extracts the largest embedded JPEG from a Nikon NEF. First tries ImageIO;
+//  falls back to a binary TIFF walk via `NikonMakerNoteParser` when ImageIO
+//  fails to surface the preview JPEG (the common case for NEF, where the
+//  full-res preview lives in a SubIFD chain rather than at a top-level
+//  image index). Mirrors the shape of `JPGSonyARWExtractor`.
 //
 
 @preconcurrency import AppKit
@@ -50,7 +51,7 @@ enum JPGNikonNEFExtractor {
                     }
                 }
 
-                var result: CGImage?
+                var imageIOResult: CGImage?
                 if targetIndex != -1 {
                     let requiresDownsampling = CGFloat(targetWidth) > maxThumbnailSize
                     if requiresDownsampling {
@@ -59,22 +60,63 @@ enum JPGNikonNEFExtractor {
                             kCGImageSourceCreateThumbnailWithTransform: true,
                             kCGImageSourceThumbnailMaxPixelSize: Int(maxThumbnailSize)
                         ]
-                        result = CGImageSourceCreateThumbnailAtIndex(imageSource, targetIndex, options as CFDictionary)
+                        imageIOResult = CGImageSourceCreateThumbnailAtIndex(imageSource, targetIndex, options as CFDictionary)
                     } else {
                         let decodeOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-                        result = CGImageSourceCreateImageAtIndex(imageSource, targetIndex, decodeOptions)
+                        imageIOResult = CGImageSourceCreateImageAtIndex(imageSource, targetIndex, decodeOptions)
                     }
                 } else {
-                    Logger.process.warning("JPGNikonNEFExtractor: no embedded JPEG found via ImageIO")
+                    Logger.process.warning("JPGNikonNEFExtractor: no embedded JPEG found via ImageIO — trying binary fallback")
                 }
 
                 for i in 0 ..< imageCount {
                     CGImageSourceRemoveCacheAtIndex(imageSource, i)
                 }
 
-                continuation.resume(returning: result)
+                let finalResult: CGImage?
+                if imageIOResult == nil {
+                    finalResult = Self.binaryFallbackJPEG(from: nefURL, fullSize: fullSize, maxSize: maxThumbnailSize)
+                    if finalResult == nil {
+                        Logger.process.warning("JPGNikonNEFExtractor: binary fallback also failed for \(nefURL.lastPathComponent)")
+                    }
+                } else {
+                    finalResult = imageIOResult
+                }
+
+                continuation.resume(returning: finalResult)
             }
         }
+    }
+
+    /// Binary fallback: walks the NEF's TIFF SubIFDs via `NikonMakerNoteParser`,
+    /// reads the embedded JPEG bytes directly, and decodes them as a plain JPEG
+    /// — bypassing any NEF-specific ImageIO path that may not surface the
+    /// preview as a top-level image index.
+    private nonisolated static func binaryFallbackJPEG(
+        from url: URL,
+        fullSize: Bool,
+        maxSize: CGFloat,
+    ) -> CGImage? {
+        guard let locations = NikonMakerNoteParser.embeddedJPEGLocations(from: url) else { return nil }
+
+        // For full-size export prefer the full-res SubIFD JPEG; for thumbnails
+        // prefer IFD1 (smaller) to save decode cost.
+        let loc = fullSize
+            ? (locations.preview ?? locations.ifd1JPEG)
+            : (locations.ifd1JPEG ?? locations.preview)
+
+        guard let loc,
+              let data = NikonMakerNoteParser.readEmbeddedJPEGData(at: loc, from: url),
+              let src = CGImageSourceCreateWithData(data as CFData, nil)
+        else { return nil }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxSize)
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
     private nonisolated static func getWidth(from properties: [CFString: Any]) -> Int? {

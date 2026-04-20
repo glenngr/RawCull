@@ -32,6 +32,29 @@
 
 import Foundation
 
+// MARK: - Embedded JPEG locations
+
+/// Absolute file offsets for JPEGs embedded in a Nikon NEF.
+/// Used as a binary fallback when ImageIO does not expose the preview JPEG as
+/// a sub-image index (the common case for NEF, where the full-res preview
+/// lives inside a SubIFD chain rather than at a top-level image index).
+struct NEFEmbeddedJPEGLocations {
+    struct Location {
+        let offset: Int
+        let length: Int
+    }
+
+    /// Largest Compression=6 SubIFD referenced by IFD0 tag 0x014A.
+    let preview: Location?
+    /// IFD1 preview JPEG (JPEGInterchangeFormat / Length), when present.
+    let ifd1JPEG: Location?
+
+    nonisolated init(preview: Location? = nil, ifd1JPEG: Location? = nil) {
+        self.preview = preview
+        self.ifd1JPEG = ifd1JPEG
+    }
+}
+
 enum NikonMakerNoteParser {
     /// Returns "width height x y" for the AF focus location encoded in the
     /// Nikon MakerNote's AFInfo2 tag. Shape matches `SonyMakerNoteParser.focusLocation`
@@ -54,6 +77,39 @@ enum NikonMakerNoteParser {
               let result = NikonTIFFParser(data: full)?.parseAFFocusLocation()
         else { return nil }
         return "\(result.width) \(result.height) \(result.x) \(result.y)"
+    }
+
+    /// Walks the NEF's TIFF IFD structures and returns absolute file offsets for
+    /// the embedded JPEG(s). Fast path reads the first 1 MB (enough to cover
+    /// IFD0/SubIFDs on all tested Z-series bodies); slow path re-reads the full
+    /// file if the fast-path walk yielded nothing.
+    nonisolated static func embeddedJPEGLocations(from url: URL) -> NEFEmbeddedJPEGLocations? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+
+        guard let data = try? fh.read(upToCount: 1024 * 1024),
+              let parser = NikonTIFFParser(data: data)
+        else { return nil }
+        let initial = parser.parseEmbeddedJPEGLocations()
+        if initial.preview != nil || initial.ifd1JPEG != nil { return initial }
+
+        try? fh.seek(toOffset: 0)
+        guard let full = try? fh.read(upToCount: Int.max),
+              full.count > data.count,
+              let fullParser = NikonTIFFParser(data: full)
+        else { return initial }
+        return fullParser.parseEmbeddedJPEGLocations()
+    }
+
+    /// Reads raw bytes for an embedded JPEG from the file at the given absolute offset.
+    nonisolated static func readEmbeddedJPEGData(
+        at location: NEFEmbeddedJPEGLocations.Location,
+        from url: URL,
+    ) -> Data? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: UInt64(location.offset))
+        return try? fh.read(upToCount: location.length)
     }
 }
 
@@ -137,6 +193,107 @@ private struct NikonTIFFParser {
               x > 0 || y > 0 else { return nil }
 
         return (width, height, x, y)
+    }
+
+    // MARK: - Embedded JPEG locations
+
+    /// Walks IFD0 → SubIFDs (tag 0x014A) → picks the largest SubIFD whose
+    /// Compression (0x0103) == 6 (OldJPEG), reading the JPEG location from
+    /// StripOffsets/StripByteCounts (0x0111/0x0117), falling back to
+    /// JPEGInterchangeFormat/Length (0x0201/0x0202). Also probes IFD1 for a
+    /// secondary preview. All offsets are absolute within the outer file.
+    nonisolated func parseEmbeddedJPEGLocations() -> NEFEmbeddedJPEGLocations {
+        typealias Loc = NEFEmbeddedJPEGLocations.Location
+
+        guard let ifd0Raw = readU32(at: 4, littleEndian: le) else { return .init() }
+        let ifd0 = Int(ifd0Raw)
+
+        // IFD0 → SubIFDs (tag 0x014A). For count N > 1, the tag's value is a
+        // pointer to a LONG[N] array of IFD offsets. For N == 1 with inline
+        // storage (bytes <= 4) the value itself *is* the sub-IFD offset.
+        let subIFDOffsets = readSubIFDOffsets(in: ifd0, tag: 0x014A, littleEndian: le)
+
+        var best: Loc?
+        for sub in subIFDOffsets {
+            guard let loc = jpegLocation(in: sub, littleEndian: le) else { continue }
+            if best == nil || loc.length > (best?.length ?? 0) {
+                best = loc
+            }
+        }
+
+        // IFD1 (via NextIFD pointer at end of IFD0) — some bodies store a
+        // preview JPEG here addressed via JPEGInterchangeFormat (0x0201).
+        var ifd1JPEG: Loc?
+        if ifd0 + 2 <= data.count {
+            let ifd0Count = Int(readU16(at: ifd0, littleEndian: le))
+            let nextIFDPtr = ifd0 + 2 + ifd0Count * 12
+            if let ifd1Raw = readU32(at: nextIFDPtr, littleEndian: le), ifd1Raw > 0 {
+                let ifd1 = Int(ifd1Raw)
+                ifd1JPEG = locateJPEG(in: ifd1, offTag: 0x0201, lenTag: 0x0202, littleEndian: le)
+                    ?? locateJPEG(in: ifd1, offTag: 0x0111, lenTag: 0x0117, littleEndian: le)
+            }
+        }
+
+        return .init(preview: best, ifd1JPEG: ifd1JPEG)
+    }
+
+    /// Resolves the list of SubIFD offsets stored under `tag` in the IFD at
+    /// `ifdOffset`. Returns an empty array if the tag is missing or malformed.
+    private nonisolated func readSubIFDOffsets(in ifdOffset: Int, tag: UInt16, littleEndian: Bool) -> [Int] {
+        guard ifdOffset + 2 <= data.count else { return [] }
+        let entryCount = Int(readU16(at: ifdOffset, littleEndian: littleEndian))
+        for i in 0 ..< entryCount {
+            let e = ifdOffset + 2 + i * 12
+            guard e + 12 <= data.count else { break }
+            if readU16(at: e, littleEndian: littleEndian) == tag {
+                let count = Int(readU32(at: e + 4, littleEndian: littleEndian) ?? 0)
+                // SubIFDs are TIFF type 4 (LONG, 4 bytes each) or type 13 (IFD, 4 bytes).
+                // 4 bytes fit inline when count == 1; otherwise the value is a pointer
+                // to a LONG[count] array.
+                if count == 1 {
+                    guard let v = readU32(at: e + 8, littleEndian: littleEndian) else { return [] }
+                    return [Int(v)]
+                }
+                guard let arrayPtr = readU32(at: e + 8, littleEndian: littleEndian) else { return [] }
+                var offsets: [Int] = []
+                offsets.reserveCapacity(count)
+                for j in 0 ..< count {
+                    guard let off = readU32(at: Int(arrayPtr) + j * 4, littleEndian: littleEndian) else { break }
+                    offsets.append(Int(off))
+                }
+                return offsets
+            }
+        }
+        return []
+    }
+
+    /// Extracts a JPEG location from a SubIFD if its Compression tag (0x0103)
+    /// is 6 (OldJPEG) and it carries a usable offset/length pair.
+    private nonisolated func jpegLocation(in ifdOffset: Int, littleEndian: Bool) -> NEFEmbeddedJPEGLocations.Location? {
+        // Compression must be 6 (OldJPEG).
+        guard let (compLoc, compSize) = tagDataRange(in: ifdOffset, tag: 0x0103, littleEndian: littleEndian),
+              compSize >= 2,
+              readU16(at: compLoc, littleEndian: littleEndian) == 6
+        else { return nil }
+
+        // Prefer StripOffsets/StripByteCounts; fall back to JPEGInterchangeFormat/Length.
+        return locateJPEG(in: ifdOffset, offTag: 0x0111, lenTag: 0x0117, littleEndian: littleEndian)
+            ?? locateJPEG(in: ifdOffset, offTag: 0x0201, lenTag: 0x0202, littleEndian: littleEndian)
+    }
+
+    /// Reads two LONG tags (offset + byte count) from an IFD and returns them
+    /// as a Location. Both must be present and non-zero.
+    private nonisolated func locateJPEG(
+        in ifdOffset: Int,
+        offTag: UInt16,
+        lenTag: UInt16,
+        littleEndian: Bool,
+    ) -> NEFEmbeddedJPEGLocations.Location? {
+        guard let offset = subIFDOffset(in: ifdOffset, tag: offTag, littleEndian: littleEndian),
+              let length = subIFDOffset(in: ifdOffset, tag: lenTag, littleEndian: littleEndian),
+              offset > 0, length > 0
+        else { return nil }
+        return .init(offset: offset, length: length)
     }
 
     // MARK: - Binary helpers

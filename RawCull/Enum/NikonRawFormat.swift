@@ -2,10 +2,10 @@
 //  NikonRawFormat.swift
 //  RawCull
 //
-//  `RawFormat` conformer for Nikon NEF. Uses ImageIO's embedded-JPEG path
-//  for thumbnails and full-resolution previews — no binary fallback is
-//  needed for macOS 26 on Z-series and D850+ bodies, whose NEF is fully
-//  supported by the system RAW pipeline.
+//  `RawFormat` conformer for Nikon NEF. Delegates thumbnail and full-res
+//  JPEG extraction to the dedicated extractors; full-res extraction uses
+//  ImageIO first with a binary TIFF-walk fallback for NEFs whose preview
+//  JPEG is not surfaced as a top-level image index.
 //
 
 import CoreGraphics
