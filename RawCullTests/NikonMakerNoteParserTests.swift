@@ -341,7 +341,9 @@ struct NikonEmbeddedJPEGLocatorTests {
         let subIFDSize = 2 + 3 * 12 + 4
         let payloadOffset = subIFDOffset + subIFDSize
 
-        func le16(_ v: UInt16) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8)] }
+        func le16(_ v: UInt16) -> [UInt8] {
+            [UInt8(v & 0xFF), UInt8(v >> 8)]
+        }
         func le32(_ v: UInt32) -> [UInt8] {
             [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8(v >> 24)]
         }
