@@ -8,11 +8,8 @@
 //  supported by the system RAW pipeline.
 //
 
-import AppKit
 import CoreGraphics
 import Foundation
-import ImageIO
-import OSLog
 
 enum NikonRawFormat: RawFormat {
     nonisolated static let extensions: Set<String> = ["nef"]
@@ -25,72 +22,11 @@ enum NikonRawFormat: RawFormat {
         maxDimension: CGFloat,
         qualityCost: Int,
     ) async throws -> CGImage {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let image = try extractThumbnailSync(
-                        from: url,
-                        maxDimension: maxDimension,
-                        qualityCost: qualityCost,
-                    )
-                    continuation.resume(returning: image)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-    }
-
-    private nonisolated static func extractThumbnailSync(
-        from url: URL,
-        maxDimension: CGFloat,
-        qualityCost: Int,
-    ) throws -> CGImage {
-        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else {
-            throw ThumbnailError.invalidSource
-        }
-
-        let thumbOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-
-        guard let raw = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-            throw ThumbnailError.generationFailed
-        }
-        return try rerender(raw, qualityCost: qualityCost)
-    }
-
-    private nonisolated static func rerender(_ image: CGImage, qualityCost: Int) throws -> CGImage {
-        let interpolationQuality: CGInterpolationQuality = switch qualityCost {
-        case 1 ... 2: .low
-        case 3 ... 4: .medium
-        default: .high
-        }
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-            throw ThumbnailError.contextCreationFailed
-        }
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        guard let context = CGContext(
-            data: nil,
-            width: image.width,
-            height: image.height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo.rawValue,
-        ) else {
-            throw ThumbnailError.contextCreationFailed
-        }
-        context.interpolationQuality = interpolationQuality
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        guard let result = context.makeImage() else {
-            throw ThumbnailError.generationFailed
-        }
-        return result
+        try await NikonThumbnailExtractor.extractNikonThumbnail(
+            from: url,
+            maxDimension: maxDimension,
+            qualityCost: qualityCost,
+        )
     }
 
     // MARK: - Full-resolution embedded JPEG
