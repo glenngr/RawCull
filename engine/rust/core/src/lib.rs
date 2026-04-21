@@ -113,21 +113,29 @@ fn collect_supported_files(path: &Path, out: &mut Vec<CatalogItem>) -> std::io::
     for entry in fs::read_dir(path)? {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(err) => return Err(err),
         };
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
-            Err(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(err) => return Err(err),
         };
         let entry_path = entry.path();
 
-        if file_type.is_symlink() {
-            continue;
-        }
-
         if file_type.is_dir() {
-            let _ = collect_supported_files(&entry_path, out);
-        } else if file_type.is_file() && is_supported_extension(&entry_path) {
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            match collect_supported_files(&entry_path, out) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                Err(err) => return Err(err),
+            }
+        } else if (file_type.is_file() || (file_type.is_symlink() && entry_path.is_file()))
+            && is_supported_extension(&entry_path)
+        {
             out.push(CatalogItem::new(entry_path));
         }
     }
