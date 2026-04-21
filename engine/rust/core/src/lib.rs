@@ -111,12 +111,23 @@ pub fn scan_catalog(path: &Path) -> std::io::Result<Vec<CatalogItem>> {
 
 fn collect_supported_files(path: &Path, out: &mut Vec<CatalogItem>) -> std::io::Result<()> {
     for entry in fs::read_dir(path)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
         let entry_path = entry.path();
 
-        if entry_path.is_dir() {
-            collect_supported_files(&entry_path, out)?;
-        } else if entry_path.is_file() && is_supported_extension(&entry_path) {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            let _ = collect_supported_files(&entry_path, out);
+        } else if file_type.is_file() && is_supported_extension(&entry_path) {
             out.push(CatalogItem::new(entry_path));
         }
     }
@@ -128,6 +139,8 @@ fn collect_supported_files(path: &Path, out: &mut Vec<CatalogItem>) -> std::io::
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(unix)]
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
     fn make_temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -191,5 +204,66 @@ mod tests {
         assert!(!catalog.set_rating_by_id("missing", Rating::One));
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn scan_skips_directory_symlinks() {
+        let root = make_temp_dir("symlink_dir");
+        let real_dir = root.join("real");
+        fs::create_dir_all(&real_dir).expect("create real dir");
+        let real_file = real_dir.join("one.ARW");
+        fs::write(&real_file, b"x").expect("write real file");
+
+        let link_dir = root.join("linked_dir");
+        if !create_dir_symlink(&real_dir, &link_dir) {
+            fs::remove_dir_all(root).expect("cleanup");
+            return;
+        }
+
+        let catalog = Catalog::load(&root).expect("scan");
+        assert_eq!(catalog.item_count(), 1);
+        let scanned: Vec<PathBuf> = catalog.items().iter().map(|i| i.path.clone()).collect();
+        assert!(scanned.contains(&real_file));
+
+        fs::remove_file(&link_dir).expect("remove symlink");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_unreadable_subdirectories() {
+        let root = make_temp_dir("unreadable");
+        let blocked_dir = root.join("blocked");
+        fs::create_dir_all(&blocked_dir).expect("create blocked dir");
+        let readable = root.join("readable.ARW");
+        let hidden = blocked_dir.join("hidden.NEF");
+
+        fs::write(&readable, b"x").expect("write readable file");
+        fs::write(&hidden, b"x").expect("write hidden file");
+
+        fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o000))
+            .expect("lock blocked dir");
+
+        let catalog = Catalog::load(&root).expect("scan");
+        let scanned: Vec<PathBuf> = catalog.items().iter().map(|i| i.path.clone()).collect();
+        assert!(scanned.contains(&readable));
+        let blocked_dir_is_readable = fs::read_dir(&blocked_dir).is_ok();
+        if !blocked_dir_is_readable {
+            assert!(!scanned.contains(&hidden));
+        }
+
+        fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o755))
+            .expect("unlock blocked dir");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(src: &Path, dst: &Path) -> bool {
+        std::os::unix::fs::symlink(src, dst).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(src: &Path, dst: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(src, dst).is_ok()
     }
 }
