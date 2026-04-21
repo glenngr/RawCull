@@ -18,6 +18,9 @@ Eksponerte funksjoner:
 - `rawcull_engine_get_item_path(engine, index)`
 - `rawcull_engine_get_item_rating(engine, index)`
 - `rawcull_engine_set_item_rating(engine, index, rating)`
+- `rawcull_engine_set_cache_dir(engine, cache_dir)`
+- `rawcull_engine_cache_thumbnail(engine, index, max_bytes)`
+- `rawcull_engine_get_last_error(engine)`
 - `rawcull_string_free(ptr)`
 
 ## Kommandoer

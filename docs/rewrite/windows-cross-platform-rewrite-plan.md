@@ -20,6 +20,10 @@
 - 🔜 Neste steg:
   - Koble Flutter UI direkte til native FFI-bibliotek.
   - Bytte placeholder-data med ekte katalogdata.
+- ✅ M2 (thumbnail/cache baseline) implementert:
+  - Disk-cache modul for thumbnails i Rust core.
+  - FFI-funksjoner for cache-dir og thumbnail-generering.
+  - Windows-oppskrift dokumentert for `rawcull_ffi.dll` load-path i Flutter.
 
 ## 1. Mål
 

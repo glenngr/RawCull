@@ -1,5 +1,6 @@
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +110,79 @@ pub fn scan_catalog(path: &Path) -> std::io::Result<Vec<CatalogItem>> {
     Ok(Catalog::load(path)?.items)
 }
 
+#[derive(Debug, Clone)]
+pub struct ThumbnailCache {
+    root_dir: PathBuf,
+}
+
+impl ThumbnailCache {
+    pub fn new(root_dir: PathBuf) -> Self {
+        Self { root_dir }
+    }
+
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    pub fn cache_thumbnail_for_file(
+        &self,
+        source_file: &Path,
+        max_bytes: usize,
+    ) -> std::io::Result<PathBuf> {
+        fs::create_dir_all(&self.root_dir)?;
+
+        let cache_file = self.cache_file_path(source_file);
+        let source_meta = fs::metadata(source_file)?;
+        let source_mtime = source_meta.modified()?;
+
+        let should_refresh = match fs::metadata(&cache_file) {
+            Ok(meta) => match meta.modified() {
+                Ok(cache_mtime) => cache_mtime < source_mtime,
+                Err(_) => true,
+            },
+            Err(_) => true,
+        };
+
+        if should_refresh {
+            let thumb_bytes = generate_thumbnail_stub_bytes(source_file, max_bytes)?;
+            let mut file = fs::File::create(&cache_file)?;
+            std::io::Write::write_all(&mut file, &thumb_bytes)?;
+        }
+
+        Ok(cache_file)
+    }
+
+    pub fn cache_file_path(&self, source_file: &Path) -> PathBuf {
+        let key = stable_path_hash_hex(source_file);
+        self.root_dir.join(format!("{key}.thumb"))
+    }
+}
+
+pub fn generate_thumbnail_stub_bytes(
+    source_file: &Path,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(source_file)?;
+    let mut buffer = Vec::with_capacity(max_bytes.min(1024 * 1024));
+    file.by_ref()
+        .take(max_bytes as u64)
+        .read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn stable_path_hash_hex(path: &Path) -> String {
+    // FNV-1a 64-bit for stable, dependency-free path hashing.
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let path_text = path.to_string_lossy();
+    let mut hash = OFFSET_BASIS;
+    for byte in path_text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 fn collect_supported_files(path: &Path, out: &mut Vec<CatalogItem>) -> std::io::Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
@@ -189,6 +263,28 @@ mod tests {
         assert!(catalog.set_rating_by_id(&id, Rating::Four));
         assert_eq!(catalog.items()[0].rating, Rating::Four);
         assert!(!catalog.set_rating_by_id("missing", Rating::One));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn thumbnail_cache_writes_and_reuses_cached_file() {
+        let root = make_temp_dir("thumb");
+        let source = root.join("image.ARW");
+        fs::write(&source, b"abcdefghijklmnopqrstuvwxyz").expect("write source");
+
+        let cache = ThumbnailCache::new(root.join("cache"));
+        let cached = cache
+            .cache_thumbnail_for_file(&source, 8)
+            .expect("cache thumb");
+        assert!(cached.exists());
+        let bytes = fs::read(&cached).expect("read cache");
+        assert_eq!(bytes, b"abcdefgh");
+
+        let cached_again = cache
+            .cache_thumbnail_for_file(&source, 8)
+            .expect("cache thumb again");
+        assert_eq!(cached, cached_again);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
