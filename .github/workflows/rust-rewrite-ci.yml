@@ -1,0 +1,39 @@
+name: Rust Rewrite CI
+
+on:
+  pull_request:
+    paths:
+      - 'engine/rust/**'
+      - '.github/workflows/rust-rewrite-ci.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'engine/rust/**'
+      - '.github/workflows/rust-rewrite-ci.yml'
+
+jobs:
+  rust-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine/rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo check
+        run: cargo check --workspace
+
+      - name: Cargo test
+        run: cargo test --workspace

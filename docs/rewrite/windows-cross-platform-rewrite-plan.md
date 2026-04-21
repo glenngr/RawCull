@@ -7,6 +7,20 @@
   - [ADR-001: Engine stack (Rust vs C++)](../adr/ADR-001-engine-stack-rust-vs-cpp.md)
   - [ADR-002: ONNX Execution Providers på Windows](../adr/ADR-002-onnx-runtime-execution-providers-windows.md)
 
+## Implementasjonsstatus
+
+- ✅ Fase 1 kickoff fullført:
+  - Opprettet `engine/rust/` workspace med `core` og `ffi`.
+  - Opprettet CI-workflow for Rust med `fmt`, `clippy`, `check` og `test`.
+  - Opprettet `apps/flutter_desktop/` struktur med `pubspec`, `lib/main.dart` og test-hook.
+- ✅ M1 (første leveranse) implementert:
+  - Rekursiv katalogscan for støttede filtyper.
+  - Rating-modell og oppdatering per item.
+  - FFI-funksjoner for `scan_catalog`, `item_count`, `get_item_path`, `get_item_rating`, `set_item_rating`.
+- 🔜 Neste steg:
+  - Koble Flutter UI direkte til native FFI-bibliotek.
+  - Bytte placeholder-data med ekte katalogdata.
+
 ## 1. Mål
 
 Bygge en ny desktop-app med samme kjernefunksjonalitet som RawCull, men uten avhengighet til macOS-spesifikke rammeverk.

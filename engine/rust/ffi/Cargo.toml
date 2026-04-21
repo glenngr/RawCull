@@ -1,0 +1,12 @@
+[package]
+name = "rawcull_ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "C ABI bridge for RawCull rewrite engine"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rawcull_core = { path = "../core" }
