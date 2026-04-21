@@ -27,7 +27,7 @@ actor SharedMemoryCache {
     private var cacheMemory = 0
     private var cacheDisk = 0
     /// Note: cacheEvictions is now tracked by CacheDelegate and read from there
-    private nonisolated(unsafe) let _gridCost = OSAllocatedUnfairLock(initialState: 0)
+    private let _gridCost = OSAllocatedUnfairLock(initialState: 0)
     // For Cache monitor
 
     // MARK: - Memory pressure level
